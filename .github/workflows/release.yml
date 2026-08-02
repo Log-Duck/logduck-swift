@@ -1,0 +1,101 @@
+# Cuts a release.
+#
+#   git tag v1.1.0 && git push origin v1.1.0
+#
+# Swift Package Manager has no registry: consumers resolve this package
+# straight from the git tag, so pushing the tag *is* the release. There is
+# nothing to upload, which makes the whole job a gate — by the time anything
+# could be published it already has been.
+#
+# That inverts the usual order of risk. Elsewhere a bad version fails before it
+# ships; here a bad tag is already live the moment it is pushed, and anyone who
+# resolves the package in between gets it. So this runs the full suite and, if
+# it fails, says plainly that the fix is to delete the tag.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check the version constant matches the tag
+        id: version
+        run: |
+          # logDuckSDKVersion goes out in the User-Agent of every request, so a
+          # tag that disagrees with it makes the traffic lie about which build
+          # sent it.
+          src=$(sed -n 's/^let logDuckSDKVersion = "\(.*\)"$/\1/p' Sources/LogDuck/LogDuckClient.swift)
+          if [[ -z "$src" ]]; then
+            echo "::error::No logDuckSDKVersion found in Sources/LogDuck/LogDuckClient.swift."
+            exit 1
+          fi
+
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [[ "$tag" != "$src" ]]; then
+              echo "::error::Tag says $tag but logDuckSDKVersion is $src. Delete the tag, fix the constant, re-tag."
+              exit 1
+            fi
+          fi
+
+          echo "Releasing version $src"
+          echo "value=$src" >> "$GITHUB_OUTPUT"
+
+      - run: swift build
+      - run: swift test
+      - run: swift build -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+
+      # Resolving the package from a clean checkout is the one thing that
+      # proves a consumer can actually use this tag.
+      - name: Verify the package resolves standalone
+        run: |
+          work=$(mktemp -d)
+          cd "$work"
+          mkdir -p Consumer/Sources/Consumer
+          cat > Consumer/Package.swift <<EOF
+          // swift-tools-version: 5.9
+          import PackageDescription
+          let package = Package(
+              name: "Consumer",
+              platforms: [.macOS(.v10_15)],
+              dependencies: [.package(path: "$GITHUB_WORKSPACE")],
+              targets: [.target(name: "Consumer", dependencies: [.product(name: "LogDuck", package: "logduck-swift")])]
+          )
+          EOF
+          cat > Consumer/Sources/Consumer/main.swift <<'EOF'
+          import LogDuck
+          // Touch the public surface a consumer actually depends on. If any of
+          // this stopped being public, the build fails here rather than in
+          // someone else's app.
+          let options = LogDuckOptions(apiKey: "ld_x", source: "consumer")
+          let client = LogDuckClient(options: options)
+          _ = client.validateConfiguration()
+          _ = LogDuckEvent(type: "smoke.test", data: ["ok": true])
+          EOF
+          cd Consumer && swift build
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "${{ github.ref_type }}" != "tag" ]]; then
+            echo "Manual run — skipping release creation."
+            exit 0
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

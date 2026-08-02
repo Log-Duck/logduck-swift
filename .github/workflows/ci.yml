@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - run: swift --version
+      - run: swift build
+      - run: swift test
+
+      # The package declares Sendable conformances. Without this they are
+      # checked loosely, and the first consumer to build in the Swift 6
+      # language mode inherits the errors instead of us.
+      - name: Build with complete concurrency checking
+        run: swift build -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container: swift:6.0
+    steps:
+      - uses: actions/checkout@v6
+
+      # This is the only job that compiles the FoundationNetworking branch —
+      # on Linux, URLRequest and HTTPURLResponse live in a separate module and
+      # allHeaderFields is case-sensitive.
+      - run: swift build
+      - run: swift test
+
+  ios:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+
+      # `swift build` only ever builds for macOS, so nothing else here checks
+      # the iOS 13 floor the package advertises. An API introduced in iOS 15 —
+      # URLSession.data(for:) being the obvious trap — compiles fine on macOS
+      # and fails only for the consumer.
+      - name: Build for iOS
+        run: |
+          xcodebuild build \
+            -scheme LogDuck \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcpretty || exit ${PIPESTATUS[0]}
