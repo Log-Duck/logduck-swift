@@ -6,7 +6,7 @@ import Foundation
 
 /// The version reported in the `User-Agent` header. Kept in step with the git
 /// tag by the release workflow, which fails if the two disagree.
-let logDuckSDKVersion = "1.0.0"
+let logDuckSDKVersion = "2.0.0"
 
 /// How the client performs a request. Injectable so tests need no network.
 public protocol LogDuckTransport: Sendable {
@@ -148,6 +148,7 @@ public final class LogDuckClient: Sendable {
         static let source = 200
         static let subject = 500
         static let sessionId = 256
+        static let message = 500
         static let emoji = 10
     }
 
@@ -165,6 +166,9 @@ public final class LogDuckClient: Sendable {
         }
         if let sessionId = event.sessionId, sessionId.count > Limits.sessionId {
             return "sessionId exceeds \(Limits.sessionId) characters"
+        }
+        if let message = event.message, message.count > Limits.message {
+            return "message exceeds \(Limits.message) characters"
         }
         if let emoji = event.emoji, emoji.count > Limits.emoji {
             return "emoji exceeds \(Limits.emoji) characters"
@@ -191,16 +195,22 @@ public final class LogDuckClient: Sendable {
         let type: String
         let source: String
         let subject: String?
-        let sessionId: String?
+        let sessionid: String?
+        let message: String?
         let time: String?
         let data: [String: JSONValue]?
         let emoji: String?
 
+        // The property name IS the wire name here, since Encodable uses it
+        // verbatim. `sessionid` is lowercase because a CloudEvents extension
+        // attribute name must be, and the server discards what it does not
+        // recognise rather than erroring.
         init(event: LogDuckEvent, source: String) {
             self.type = event.type
             self.source = source
             self.subject = event.subject
-            self.sessionId = event.sessionId
+            self.sessionid = event.sessionId
+            self.message = event.message
             self.time = event.time.map(iso8601String(from:))
             self.data = event.data
             self.emoji = event.emoji

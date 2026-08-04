@@ -72,6 +72,7 @@ try await logduck.send(
         type: "order.placed",                   // required — max 100 chars, naming rule below
         subject: "order_9127",                  // optional — what the event is about, max 500 chars
         sessionId: "sess_8f21c",                // optional — groups related events, max 256 chars
+        message: "Order placed on the Pro plan", // optional — the push notification body, max 500 chars
         time: Date(),                           // optional — defaults to when the server received it
         data: ["total": 4999, "currency": "NOK"], // optional — see JSONValue below
         emoji: "🛒"                              // optional — shown next to the event, max 10 chars
@@ -81,6 +82,15 @@ try await logduck.send(
 
 One client is enough for a process. It is `Sendable`, so it can be held in a
 `let` and used from any actor.
+
+**`message` is what a push notification shows.** Without it the body falls back
+to listing the first few `data` keys, which reads like `total: 4999, currency:
+NOK` rather than "Order placed on the Pro plan".
+
+**Wire names.** The event is a CloudEvents 1.0 document, and a CloudEvents
+extension attribute name must be lowercase alphanumeric — so `sessionId` goes
+out as `sessionid`. The SDK maps it for you; you only need this when comparing
+against the raw HTTP API.
 
 **Naming `type`:** the server lowercases it and requires `^[a-z][a-z0-9_.]*$` —
 letters, digits, `_` and `.`, starting with a letter. So `order.placed` and

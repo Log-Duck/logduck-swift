@@ -13,7 +13,17 @@ public struct LogDuckEvent: Sendable {
     public var subject: String?
 
     /// Groups related events within a session (max 256).
+    /// Groups related events within a session (max 256).
+    ///
+    /// Sent as `sessionid`: a CloudEvents extension attribute name must be
+    /// lowercase alphanumeric, so the wire name differs from this one.
     public var sessionId: String?
+
+    /// Human-readable summary of the event (max 500 characters).
+    ///
+    /// This is what a push notification shows. Without it the body falls back
+    /// to listing the first few `data` keys.
+    public var message: String?
 
     /// When it happened. Defaults to server time if unset.
     public var time: Date?
@@ -28,6 +38,7 @@ public struct LogDuckEvent: Sendable {
         type: String,
         subject: String? = nil,
         sessionId: String? = nil,
+        message: String? = nil,
         time: Date? = nil,
         data: [String: JSONValue]? = nil,
         emoji: String? = nil
@@ -35,6 +46,7 @@ public struct LogDuckEvent: Sendable {
         self.type = type
         self.subject = subject
         self.sessionId = sessionId
+        self.message = message
         self.time = time
         self.data = data
         self.emoji = emoji

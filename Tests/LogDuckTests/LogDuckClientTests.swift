@@ -164,6 +164,46 @@ final class LogDuckClientTests: XCTestCase {
         XCTAssertNil(payload["subject"])
         XCTAssertNil(payload["emoji"])
         XCTAssertNil(payload["time"])
+        XCTAssertNil(payload["message"])
+        XCTAssertNil(payload["sessionid"])
+    }
+
+    /// The wire names are the contract, and they are not the Swift property
+    /// names. A CloudEvents extension attribute name must be lowercase
+    /// alphanumeric, so `sessionId` goes out as `sessionid`. The server
+    /// discards what it does not recognise rather than erroring, so getting
+    /// this wrong loses the field silently - hence asserting the camelCase
+    /// spelling is absent, not just that the lowercase one is present.
+    func testSendsCloudEventsWireNames() async throws {
+        let transport = FakeTransport([.ok()])
+        let client = makeClient(transport)
+
+        _ = try await client.send(
+            LogDuckEvent(
+                type: "order.placed",
+                subject: "order_9127",
+                sessionId: "sess_8f21c",
+                message: "Order placed on the Pro plan"
+            )
+        )
+
+        let payload = try body(of: XCTUnwrap(transport.requests.first))
+        XCTAssertEqual(payload["sessionid"] as? String, "sess_8f21c")
+        XCTAssertEqual(payload["message"] as? String, "Order placed on the Pro plan")
+        XCTAssertNil(payload["sessionId"])
+        XCTAssertNil(payload["metadata"])
+    }
+
+    func testRejectsAnOverlongMessage() async throws {
+        let transport = FakeTransport([.ok()])
+        let client = makeClient(transport)
+
+        let result = try await client.send(
+            LogDuckEvent(type: "order.placed", message: String(repeating: "x", count: 501))
+        )
+
+        XCTAssertNil(result)
+        XCTAssertTrue(transport.requests.isEmpty)
     }
 
     func testEncodesStructuredData() async throws {
