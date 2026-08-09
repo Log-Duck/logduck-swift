@@ -185,6 +185,31 @@ acceptable, so beyond `maxRetryDelay` the client gives up immediately and puts
 the remaining wait on `error.retryAfter`, letting you queue the event instead of
 losing it.
 
+## What the server adds
+
+Every event comes back with more on it than you sent. LogDuck resolves the
+request itself and stores the result as flat fields you cannot set — an event
+can never claim an origin that is not its own:
+
+| Field | |
+|---|---|
+| `requestip`, `requestagent` | The address and User-Agent the request came from |
+| `requestcountry`, `requestcontinent` | ISO 3166-1 alpha-2, and one of `AF`/`AN`/`AS`/`EU`/`NA`/`OC`/`SA` |
+| `requestregion` | First-level subdivision — state, province or region — by name |
+| `requestcity`, `requestcityid` | City name, and its GeoNames id, which tells Portland, Oregon from Portland, Maine |
+| `requestlat`, `requestlon` | The city's approximate centre, as decimal-degree strings |
+| `requesttimezone` | IANA name, e.g. `Europe/Brussels` |
+
+A country resolves for nearly every routable address; a city for rather fewer.
+Region and city are independent, so an address can resolve to one without the
+other — do not guard one on the other. The last four are present **only**
+alongside a city, and absent rather than guessed: the database answers them for
+a country-only lookup too, from the country's centroid, which for anywhere
+larger than a small country is wrong for most of the people in it.
+
+These locate a city, not a device — the underlying accuracy radius is typically
+5–200 km. If you need finer, resolve it yourself and put it in the event's data.
+
 ## Using the API without the SDK
 
 The SDK is a convenience, not a requirement — `POST /v1/events` is a plain JSON
