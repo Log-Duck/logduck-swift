@@ -12,9 +12,13 @@ Swift Package Manager, via Xcode (*File → Add Package Dependencies*) or
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Log-Duck/logduck-swift.git", from: "1.0.0")
+    .package(url: "https://github.com/Log-Duck/logduck-swift.git", from: "2.0.0")
 ]
 ```
+
+`from:` means "up to the next major", so `from: "1.0.0"` resolves 1.x and stops
+short of 2.0.0 — which is where the flat CloudEvents wire names and `message`
+live. Anyone who took the previous line from this file is still on 1.x.
 
 ## Quick start
 
