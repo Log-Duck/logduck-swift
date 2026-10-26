@@ -6,7 +6,7 @@ import Foundation
 
 /// The version reported in the `User-Agent` header. Kept in step with the git
 /// tag by the release workflow, which fails if the two disagree.
-let logDuckSDKVersion = "2.0.0"
+let logDuckSDKVersion = "2.1.0"
 
 /// How the client performs a request. Injectable so tests need no network.
 public protocol LogDuckTransport: Sendable {
