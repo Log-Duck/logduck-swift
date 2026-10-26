@@ -250,9 +250,10 @@ the address.
 
 Until `consent(true)`, nothing identifying is stored on the device. The SDK
 keeps one flag recording that the app has been installed, and unsent hits in
-the caches directory.
+the caches directory. Those hits hold the install ID and user ID until they are
+sent; `consent(false)` strips the install ID from them.
 
-Hits are batched: sent a second after the last one, at 50, and at once when the
+Hits are batched: sent a second after the first hit queues, at 50, and at once when the
 app goes to the background — one request, with no timers running until it
 returns. A hit that cannot be sent (offline, a 5xx) stays queued, on disk, for
 the next flush; up to 500 are kept. A 4xx drops the batch and warns once, so a

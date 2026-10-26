@@ -36,10 +36,22 @@ public final class LogDuckUsage: @unchecked Sendable {
     /// A session ends after this long in the background.
     static let sessionTimeout: TimeInterval = 30 * 60
 
+    // In UTF-16 code units, as the server (zod) counts them.
     private static let screenMax = 128
     private static let userIdMax = 128
+    private static let installIdMax = 128
     private static let dimensionKeysMax = 10
     private static let dimensionValueMax = 256
+
+    /// Copied from `RESERVED_DIMENSION_KEYS` in the LogDuck server's
+    /// `functions/src/shared/schemas/hit.ts`. The server refuses a whole hit
+    /// for one of these, so they are dropped here instead.
+    static let reservedDimensionKeys: Set<String> = [
+        "id", "uid", "sub", "ip", "email", "mail", "phone", "name", "username", "address",
+        "user", "userid", "user_id", "visitor", "visitorid", "visitor_id", "session", "sessionid", "session_id",
+        "customer_id", "customerid", "member_id", "memberid", "account_id", "accountid",
+        "device_id", "deviceid", "install_id", "installid", "token", "fingerprint",
+    ]
 
     static let installedKey = "logduck.installed"
     static let installIdKey = "logduck.installid"
@@ -140,7 +152,7 @@ public final class LogDuckUsage: @unchecked Sendable {
         if key.isEmpty { warn("no key configured - every request will be refused") }
         self.dimensions = cleanDimensions(dimensions)
         // Present only if consent was granted in an earlier launch.
-        self.installId = defaults.string(forKey: Self.installIdKey)
+        self.installId = defaults.string(forKey: Self.installIdKey).map { Self.clipped($0, to: Self.installIdMax) }
         self.queue = loadQueue()
         self.queueOnDisk = !queue.isEmpty
 
@@ -164,12 +176,12 @@ public final class LogDuckUsage: @unchecked Sendable {
     /// `previous` defaults to the screen named by the last call, so a plain
     /// sequence of calls chains itself.
     public func screen(_ name: String, previous: String? = nil) {
-        let name = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(Self.screenMax))
+        let name = Self.clipped(name.trimmingCharacters(in: .whitespacesAndNewlines), to: Self.screenMax)
         guard !name.isEmpty else { return }
         let previousScreen: String? = locked {
             let chained = previous ?? lastScreen
             lastScreen = name
-            return chained.map { String($0.prefix(Self.screenMax)) }
+            return chained.map { Self.clipped($0, to: Self.screenMax) }
         }
         record("screen.view", screen: name, previousScreen: previousScreen)
     }
@@ -223,8 +235,9 @@ public final class LogDuckUsage: @unchecked Sendable {
     /// Records that the user agreed to be recognised across launches.
     ///
     /// `true` mints a random install ID, keeps it in `UserDefaults` and
-    /// attaches it to every later hit; `false` deletes it. Nothing identifying
-    /// is stored before `consent(true)`.
+    /// attaches it to every later hit; `false` deletes it and strips it from
+    /// hits still queued, in memory and on disk. Nothing identifying is stored
+    /// before `consent(true)`.
     public func consent(_ granted: Bool) {
         locked {
             if granted {
@@ -236,6 +249,15 @@ public final class LogDuckUsage: @unchecked Sendable {
             } else {
                 installId = nil
                 defaults.removeObject(forKey: Self.installIdKey)
+                for index in queue.indices { queue[index].installid = nil }
+                // Rewritten on the flush chain, so it never overlaps a flush.
+                if queueOnDisk {
+                    let previous = flushChain
+                    flushChain = Task {
+                        await previous?.value
+                        self.persist()
+                    }
+                }
             }
         }
     }
@@ -243,7 +265,7 @@ public final class LogDuckUsage: @unchecked Sendable {
     /// Links later hits to your own user ID and marks them logged in. Stores
     /// nothing on the device. An empty string clears it.
     public func identify(_ userId: String) {
-        let trimmed = String(userId.trimmingCharacters(in: .whitespacesAndNewlines).prefix(Self.userIdMax))
+        let trimmed = Self.clipped(userId.trimmingCharacters(in: .whitespacesAndNewlines), to: Self.userIdMax)
         locked { self.userId = trimmed.isEmpty ? nil : trimmed }
     }
 
@@ -444,7 +466,7 @@ public final class LogDuckUsage: @unchecked Sendable {
         return caches.appendingPathComponent("logduck").appendingPathComponent("usage.json")
     }
 
-    /// Only ever called from a flush, and flushes never overlap.
+    /// Only ever called on the flush chain, which never overlaps itself.
     private func persist() {
         guard let queueFile else { return }
         let snapshot: [Hit] = locked { queue }
@@ -519,13 +541,30 @@ public final class LogDuckUsage: @unchecked Sendable {
                 warn("dimension \"\(key)\" dropped: keys are lowercase identifiers of at most 64 characters")
                 continue
             }
+            guard !Self.reservedDimensionKeys.contains(key) else {
+                warn("dimension \"\(key)\" dropped: dimensions must not carry an identifier")
+                continue
+            }
             guard out.count < Self.dimensionKeysMax else {
                 warn("dimension \"\(key)\" dropped: at most \(Self.dimensionKeysMax) dimensions")
                 continue
             }
-            out[key] = String(value.prefix(Self.dimensionValueMax))
+            out[key] = Self.clipped(value, to: Self.dimensionValueMax)
         }
         return out.isEmpty ? nil : out
+    }
+
+    /// At most `max` UTF-16 code units, cut on a character boundary.
+    static func clipped(_ value: String, to max: Int) -> String {
+        guard value.utf16.count > max else { return value }
+        var units = 0
+        var end = value.startIndex
+        for character in value {
+            units += character.utf16.count
+            if units > max { break }
+            end = value.index(after: end)
+        }
+        return String(value[..<end])
     }
 
     /// `^[a-z][a-z0-9_]{0,63}$`, the server's rule.

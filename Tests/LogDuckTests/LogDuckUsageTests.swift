@@ -24,6 +24,24 @@ final class TestClock: @unchecked Sendable {
     }
 }
 
+/// Keeps every warning, for the tests that assert on them.
+final class RecordingLogger: LogDuckLogger, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String] = []
+
+    var messages: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
+
+    func warn(_ message: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        recorded.append(message)
+    }
+}
+
 extension FakeTransport.Reply {
     static func noContent() -> Self {
         Self(status: 204, body: "", headers: [:], error: nil)
@@ -52,14 +70,18 @@ final class LogDuckUsageTests: XCTestCase {
     }
 
     /// The timer is set far out so only the test decides when a flush runs.
-    private func makeUsage(_ transport: FakeTransport, dimensions: [String: String] = [:]) -> LogDuckUsage {
+    private func makeUsage(
+        _ transport: FakeTransport,
+        dimensions: [String: String] = [:],
+        logger: LogDuckLogger = SilentLogger()
+    ) -> LogDuckUsage {
         let clock = self.clock
         return LogDuckUsage(
             key: "ld_client_key",
             baseURL: LogDuckOptions.defaultBaseURL,
             dimensions: dimensions,
             transport: transport,
-            logger: SilentLogger(),
+            logger: logger,
             defaults: defaults,
             queueFile: queueFile,
             flushInterval: 600,
@@ -212,6 +234,8 @@ final class LogDuckUsageTests: XCTestCase {
         // A later launch reuses it.
         let relaunched = makeUsage(transport)
         relaunched.screen("Relaunched")
+        // Sent before withdrawal; a hit still queued would be stripped.
+        await usage.flushAndWait()
 
         usage.consent(false)
         XCTAssertNil(defaults.string(forKey: LogDuckUsage.installIdKey))
@@ -260,6 +284,80 @@ final class LogDuckUsageTests: XCTestCase {
         let dimensions = try XCTUnwrap(try allHits(transport)[0]["dimensions"] as? [String: String])
         XCTAssertEqual(Array(dimensions.keys), ["variant"])
         XCTAssertEqual(dimensions["variant"]?.count, 256)
+    }
+
+    func testDropsAReservedDimensionKeyWithOneWarningAndStillSendsTheHit() async throws {
+        let transport = FakeTransport([.noContent()])
+        let logger = RecordingLogger()
+        let usage = makeUsage(transport, logger: logger)
+
+        usage.setDimensions(["section": "shop", "user_id": "42"])
+        usage.screen("Home")
+        await usage.flushAndWait()
+
+        let hit = try XCTUnwrap(try allHits(transport).first)
+        XCTAssertEqual(hit["screen"] as? String, "Home")
+        XCTAssertEqual(hit["dimensions"] as? [String: String], ["section": "shop"])
+        XCTAssertEqual(logger.messages.filter { $0.contains("user_id") }.count, 1)
+    }
+
+    func testLimitsCountUTF16CodeUnits() async throws {
+        let transport = FakeTransport([.noContent()])
+        let usage = makeUsage(transport)
+
+        // 63 emoji (two code units each) and "ab": 128 units, then one more.
+        let screen = String(repeating: "\u{1F986}", count: 63) + "abc"
+        XCTAssertEqual(screen.utf16.count, 129)
+        XCTAssertEqual(screen.count, 66)  // well under 128 characters
+        usage.screen(screen)
+        // An emoji straddling the limit is dropped whole, never split.
+        usage.screen(String(repeating: "\u{1F986}", count: 65))
+        await usage.flushAndWait()
+
+        let sent = try allHits(transport)
+        let first = try XCTUnwrap(sent[0]["screen"] as? String)
+        XCTAssertEqual(first, String(repeating: "\u{1F986}", count: 63) + "ab")
+        XCTAssertEqual(first.utf16.count, 128)
+        let second = try XCTUnwrap(sent[1]["screen"] as? String)
+        XCTAssertEqual(second, String(repeating: "\u{1F986}", count: 64))
+        XCTAssertEqual(sent[1]["previousscreen"] as? String, first)
+    }
+
+    func testWithdrawingConsentStripsTheInstallIdFromQueuedHits() async throws {
+        let failing = FakeTransport([.failure(), .failure()])
+        let usage = makeUsage(failing)
+
+        usage.consent(true)
+        usage.screen("Queued")
+        await usage.flushAndWait()  // fails, so the hit is kept on disk
+        let onDisk = try String(contentsOf: queueFile, encoding: .utf8)
+        XCTAssertTrue(onDisk.contains("installid"))
+
+        usage.consent(false)
+        await usage.flushAndWait(maxBatches: 0)
+        XCTAssertFalse(try String(contentsOf: queueFile, encoding: .utf8).contains("installid"))
+
+        // A later launch reads the stripped queue from disk.
+        let relaunchTransport = FakeTransport([.noContent()])
+        let relaunched = makeUsage(relaunchTransport)
+        await relaunched.flushAndWait()
+        let resent = try XCTUnwrap(try allHits(relaunchTransport).first)
+        XCTAssertEqual(resent["screen"] as? String, "Queued")
+        XCTAssertNil(resent["installid"])
+    }
+
+    func testWithdrawingConsentStripsTheInstallIdFromHitsInMemory() async throws {
+        let transport = FakeTransport([.noContent()])
+        let usage = makeUsage(transport)
+
+        usage.consent(true)
+        usage.screen("Queued")
+        usage.consent(false)
+        await usage.flushAndWait()
+
+        let hit = try XCTUnwrap(try allHits(transport).first)
+        XCTAssertEqual(hit["screen"] as? String, "Queued")
+        XCTAssertNil(hit["installid"])
     }
 
     // MARK: - Batching and the offline queue
