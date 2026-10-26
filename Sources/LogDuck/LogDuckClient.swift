@@ -97,48 +97,20 @@ public final class LogDuckClient: Sendable {
             )
         }
 
-        let maxAttempts = options.retryEnabled ? 2 : 1
+        let outcome = await performWithRetry(
+            request,
+            transport: transport,
+            maxAttempts: options.retryEnabled ? 2 : 1,
+            maxRetryDelay: options.maxRetryDelay,
+            logger: logger
+        )
 
-        for attempt in 1...maxAttempts {
-            let decision: RetryDecision
-            var payload: Data?
-
-            do {
-                let (data, response) = try await transport.perform(request)
-                payload = data
-                decision = RetryPolicy.decide(
-                    status: response.statusCode,
-                    retryAfterHeader: retryAfterHeader(from: response),
-                    body: String(data: data, encoding: .utf8) ?? "",
-                    attempt: attempt,
-                    maxAttempts: maxAttempts,
-                    maxRetryDelay: options.maxRetryDelay
-                )
-            } catch {
-                decision = RetryPolicy.decideTransportFailure(
-                    error: error,
-                    attempt: attempt,
-                    maxAttempts: maxAttempts
-                )
-            }
-
-            switch decision {
-            case .succeed:
-                return try decode(payload ?? Data())
-
-            case let .retry(delay, reason):
-                logger.warn(reason)
-                if delay > 0 {
-                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                }
-                continue
-
-            case let .fail(error, warning):
-                return try fail(error, warning)
-            }
+        switch outcome {
+        case let .succeeded(payload):
+            return try decode(payload)
+        case let .failed(error, warning):
+            return try fail(error, warning)
         }
-
-        return nil
     }
 
     // MARK: - Request construction
@@ -223,19 +195,6 @@ public final class LogDuckClient: Sendable {
         UUID().uuidString
     }
 
-    private func retryAfterHeader(from response: HTTPURLResponse) -> String? {
-        // allHeaderFields is case-sensitive on Linux, where the convenience
-        // accessor that handles this does not exist.
-        #if canImport(FoundationNetworking)
-            for (key, value) in response.allHeaderFields {
-                if (key as? String)?.lowercased() == "retry-after" { return value as? String }
-            }
-            return nil
-        #else
-            return response.value(forHTTPHeaderField: "Retry-After")
-        #endif
-    }
-
     // MARK: - Outcomes
 
     private func decode(_ data: Data) throws -> LogDuckResponse? {
@@ -255,6 +214,79 @@ public final class LogDuckClient: Sendable {
         logger.warn(warning)
         return nil
     }
+}
+
+/// How a request ended, once its retries are spent.
+enum RequestOutcome {
+    case succeeded(Data)
+    case failed(LogDuckError, warning: String)
+}
+
+/// Performs a request, retrying as ``RetryPolicy`` decides.
+///
+/// Shared by the events client and the usage tracker so the two cannot drift
+/// on what counts as retryable. The request is sent unchanged on a retry.
+func performWithRetry(
+    _ request: URLRequest,
+    transport: LogDuckTransport,
+    maxAttempts: Int,
+    maxRetryDelay: TimeInterval,
+    logger: LogDuckLogger
+) async -> RequestOutcome {
+    for attempt in 1...maxAttempts {
+        let decision: RetryDecision
+        var payload = Data()
+
+        do {
+            let (data, response) = try await transport.perform(request)
+            payload = data
+            decision = RetryPolicy.decide(
+                status: response.statusCode,
+                retryAfterHeader: retryAfterHeader(from: response),
+                body: String(data: data, encoding: .utf8) ?? "",
+                attempt: attempt,
+                maxAttempts: maxAttempts,
+                maxRetryDelay: maxRetryDelay
+            )
+        } catch {
+            decision = RetryPolicy.decideTransportFailure(
+                error: error,
+                attempt: attempt,
+                maxAttempts: maxAttempts
+            )
+        }
+
+        switch decision {
+        case .succeed:
+            return .succeeded(payload)
+
+        case let .retry(delay, reason):
+            logger.warn(reason)
+            if delay > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+            continue
+
+        case let .fail(error, warning):
+            return .failed(error, warning: warning)
+        }
+    }
+
+    // Unreachable: the last attempt always succeeds or fails.
+    return .failed(LogDuckError("No attempt was made"), warning: "request failed")
+}
+
+private func retryAfterHeader(from response: HTTPURLResponse) -> String? {
+    // allHeaderFields is case-sensitive on Linux, where the convenience
+    // accessor that handles this does not exist.
+    #if canImport(FoundationNetworking)
+        for (key, value) in response.allHeaderFields {
+            if (key as? String)?.lowercased() == "retry-after" { return value as? String }
+        }
+        return nil
+    #else
+        return response.value(forHTTPHeaderField: "Retry-After")
+    #endif
 }
 
 /// The default transport.
@@ -298,10 +330,10 @@ public struct URLSessionTransport: LogDuckTransport {
 ///
 /// `ISO8601DateFormatter` is a class with mutable state, so a shared instance
 /// is not `Sendable` — an error in the Swift 6 language mode, and a real data
-/// race if two threads format at once. This runs only when the caller sets an
-/// explicit `time`, which is the uncommon case, and costs nothing next to the
-/// HTTP request that follows it.
-private func iso8601String(from date: Date) -> String {
+/// race if two threads format at once. It runs for an event with an explicit
+/// `time` and once per usage hit — at most a few a second, which costs nothing
+/// next to the HTTP request that follows.
+func iso8601String(from date: Date) -> String {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     return formatter.string(from: date)

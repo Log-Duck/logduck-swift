@@ -210,6 +210,54 @@ larger than a small country is wrong for most of the people in it.
 These locate a city, not a device — the underlying accuracy radius is typically
 5–200 km. If you need finer, resolve it yourself and put it in the event's data.
 
+## Site usage: screens and app lifecycle
+
+`LogDuckUsage` counts how people move through your app — screen views, opens,
+installs, time in the foreground — into the **Site** tab of your project. It is
+not the events client: a hit never triggers a push or a webhook, and is billed
+against its own allowance.
+
+```swift
+import LogDuck
+
+let usage = LogDuckUsage(key: "ld_...")   // a client key, created once and kept
+
+usage.screen("Checkout")
+```
+
+The key is a **client key** created in the dashboard with **allow requests
+without an origin** switched on: an app sends no `Origin`, so without that
+switch every hit is refused. A server key is refused too — the key ships inside
+your app.
+
+On iOS and tvOS the lifecycle is recorded for you: `app.install` the first time
+the app ever runs, `app.open` once per launch, and `app.background` /
+`app.foreground` as the app leaves and returns. On macOS and watchOS call
+`open()`, `foreground()` and `background()` yourself.
+
+| Method | |
+|---|---|
+| `screen(_:previous:)` | A `screen.view`. `previous` defaults to the screen named by the last call |
+| `dimensions:`, `setDimensions(_:)` | Up to ten lowercase keys describing the screen — `section`, `variant` — never an identifier (keys like `email` or `user_id` are refused) |
+| `consent(true)` | The user agreed to be recognised across launches: a random install ID is minted, kept in `UserDefaults` and sent with every later hit. `consent(false)` deletes it. Stored by the server only once your organization has switched identity collection on in Settings and declared its basis; until then it is stripped and counted |
+| `identify(_:)` | Links later hits to your own user ID, and marks them logged in. Stores nothing on the device. `identify("")` clears it |
+| `flush()`, `stop()` | Send now; stop recording and send what is queued |
+
+Each hit carries the screen, a random session ID (a new one after 30 minutes in
+the background), your bundle identifier, the app and OS versions and the SDK
+version. The server adds a country and a city from the address, and discards
+the address.
+
+Until `consent(true)`, nothing identifying is stored on the device. The SDK
+keeps one flag recording that the app has been installed, and unsent hits in
+the caches directory.
+
+Hits are batched: sent a second after the last one, at 50, and at once when the
+app goes to the background — one request, with no timers running until it
+returns. A hit that cannot be sent (offline, a 5xx) stays queued, on disk, for
+the next flush; up to 500 are kept. A 4xx drops the batch and warns once, so a
+wrong key is visible in your logs rather than silently counted as nothing.
+
 ## Using the API without the SDK
 
 The SDK is a convenience, not a requirement — `POST /v1/events` is a plain JSON

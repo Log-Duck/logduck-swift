@@ -35,6 +35,9 @@ public struct LogDuckOptions: Sendable {
     /// API base URL. Override only for a self-hosted deployment or in tests.
     public var baseURL: URL
 
+    /// The LogDuck API.
+    public static let defaultBaseURL = URL(string: "https://api.logduck.com")!
+
     public init(
         apiKey: String,
         source: String,
@@ -42,7 +45,7 @@ public struct LogDuckOptions: Sendable {
         retryEnabled: Bool = true,
         maxRetryDelay: TimeInterval = 10,
         timeout: TimeInterval = 30,
-        baseURL: URL = URL(string: "https://api.logduck.com")!
+        baseURL: URL = LogDuckOptions.defaultBaseURL
     ) {
         self.apiKey = apiKey
         self.source = source
